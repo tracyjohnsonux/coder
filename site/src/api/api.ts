@@ -200,6 +200,29 @@ type WatchInboxNotificationsParams = Readonly<{
 	read_status?: "read" | "unread" | "all";
 }>;
 
+// TODO(AIGOV-290): drop once `ai_cost_control` is generated onto Group.
+export type GroupAICostControl = Readonly<{
+	current_spend_micros: number;
+	spend_limit_micros: number | null;
+}>;
+export type GroupWithAICostControl = TypesGen.Group &
+	Readonly<{ ai_cost_control?: GroupAICostControl }>;
+
+// TODO(AIGOV-291): drop once `ai_cost_control` is generated onto ReducedUser.
+export type GroupMemberAICostControl = Readonly<{
+	current_spend_micros: number;
+	spend_limit_micros: number | null;
+	effective_group_id: string | null;
+	limit_source: "group" | "override" | null;
+}>;
+export type GroupMemberWithAICostControl = TypesGen.ReducedUser &
+	Readonly<{ ai_cost_control?: GroupMemberAICostControl }>;
+export type GroupMembersResponseWithAICostControl = Omit<
+	TypesGen.GroupMembersResponse,
+	"users"
+> &
+	Readonly<{ users: readonly GroupMemberWithAICostControl[] }>;
+
 export function watchInboxNotifications(
 	params?: WatchInboxNotificationsParams,
 ): OneWayWebSocket<TypesGen.GetInboxNotificationResponse> {
@@ -408,6 +431,7 @@ export type DeploymentConfig = Readonly<{
 }>;
 
 const aiProviderConfigsPath = "/api/v2/ai/providers";
+const aiGatewayPath = "/api/v2/ai-gateway";
 const chatModelConfigsPath = "/api/experimental/chats/model-configs";
 const userSkillsPath = (user: string) =>
 	`/api/experimental/users/${encodeURIComponent(user)}/skills`;
@@ -1673,6 +1697,36 @@ class ApiMethods {
 		return response.data;
 	};
 
+	getUserAIBudgetOverride = async (
+		userId: TypesGen.User["id"],
+	): Promise<TypesGen.UserAIBudgetOverride> => {
+		const response = await this.axios.get<TypesGen.UserAIBudgetOverride>(
+			`/api/v2/users/${encodeURIComponent(userId)}/ai/budget`,
+		);
+
+		return response.data;
+	};
+
+	upsertUserAIBudgetOverride = async (
+		userId: TypesGen.User["id"],
+		data: TypesGen.UpsertUserAIBudgetOverrideRequest,
+	): Promise<TypesGen.UserAIBudgetOverride> => {
+		const response = await this.axios.put<TypesGen.UserAIBudgetOverride>(
+			`/api/v2/users/${encodeURIComponent(userId)}/ai/budget`,
+			data,
+		);
+
+		return response.data;
+	};
+
+	deleteUserAIBudgetOverride = async (
+		userId: TypesGen.User["id"],
+	): Promise<void> => {
+		await this.axios.delete(
+			`/api/v2/users/${encodeURIComponent(userId)}/ai/budget`,
+		);
+	};
+
 	activateUser = async (
 		userId: TypesGen.User["id"],
 	): Promise<TypesGen.User> => {
@@ -2152,11 +2206,14 @@ class ApiMethods {
 	};
 
 	getGroups = async (
-		options: { userId?: string } = {},
+		options: { userId?: string; organization?: string } = {},
 	): Promise<TypesGen.Group[]> => {
 		const params: Record<string, string> = {};
 		if (options.userId !== undefined) {
 			params.has_member = options.userId;
+		}
+		if (options.organization !== undefined) {
+			params.organization = options.organization;
 		}
 
 		const response = await this.axios.get("/api/v2/groups", { params });
@@ -2168,7 +2225,7 @@ class ApiMethods {
 	 */
 	getGroupsByOrganization = async (
 		organization: string,
-	): Promise<TypesGen.Group[]> => {
+	): Promise<GroupWithAICostControl[]> => {
 		const response = await this.axios.get(
 			`/api/v2/organizations/${organization}/groups`,
 		);
@@ -2186,6 +2243,16 @@ class ApiMethods {
 			`/api/v2/organizations/${organization}/groups`,
 			data,
 		);
+		return response.data;
+	};
+
+	getGroupById = async (
+		groupId: string,
+		req: TypesGen.GroupRequest,
+		signal?: AbortSignal,
+	): Promise<TypesGen.Group> => {
+		const url = getURLWithSearchParams(`/api/v2/groups/${groupId}`, req);
+		const response = await this.axios.get(url, { signal });
 		return response.data;
 	};
 
@@ -2211,7 +2278,7 @@ class ApiMethods {
 		groupName: string,
 		filter?: UsersRequest,
 		signal?: AbortSignal,
-	): Promise<TypesGen.GroupMembersResponse> => {
+	): Promise<GroupMembersResponseWithAICostControl> => {
 		const url = getURLWithSearchParams(
 			`/api/v2/organizations/${organization}/groups/${groupName}/members`,
 			filter,
@@ -2458,6 +2525,16 @@ class ApiMethods {
 		const params = base ? `?base=${encodeURIComponent(base)}` : "";
 		const response = await this.axios.get(
 			`/api/v2/templatebuilder/modules${params}`,
+		);
+		return response.data;
+	};
+
+	createTemplateFromBuilder = async (
+		req: TypesGen.TemplateBuilderCreateTemplateRequest,
+	): Promise<TypesGen.TemplateBuilderCreateTemplateResponse> => {
+		const response = await this.axios.post(
+			"/api/v2/templatebuilder/compose/template",
+			req,
 		);
 		return response.data;
 	};
@@ -3094,21 +3171,21 @@ class ApiMethods {
 	};
 
 	getAIBridgeModels = async (options: SearchParamOptions) => {
-		const url = getURLWithSearchParams("/api/v2/aibridge/models", options);
+		const url = getURLWithSearchParams(`${aiGatewayPath}/models`, options);
 
 		const response = await this.axios.get<string[]>(url);
 		return response.data;
 	};
 
 	getAIBridgeClients = async (options: SearchParamOptions) => {
-		const url = getURLWithSearchParams("/api/v2/aibridge/clients", options);
+		const url = getURLWithSearchParams(`${aiGatewayPath}/clients`, options);
 
 		const response = await this.axios.get<string[]>(url);
 		return response.data;
 	};
 
 	getAIBridgeSessionList = async (options: SearchParamOptions) => {
-		const url = getURLWithSearchParams("/api/v2/aibridge/sessions", options);
+		const url = getURLWithSearchParams(`${aiGatewayPath}/sessions`, options);
 		const response =
 			await this.axios.get<TypesGen.AIBridgeListSessionsResponse>(url);
 		return response.data;
@@ -3119,7 +3196,7 @@ class ApiMethods {
 		options?: { after_id?: string; before_id?: string; limit?: number },
 	) => {
 		const url = getURLWithSearchParams(
-			`/api/v2/aibridge/sessions/${sessionId}`,
+			`${aiGatewayPath}/sessions/${sessionId}`,
 			options,
 		);
 		const response =
@@ -3170,7 +3247,7 @@ class ApiMethods {
 
 	getAIGatewayKeys = async (): Promise<TypesGen.AIGatewayKey[]> => {
 		const response = await this.axios.get<TypesGen.AIGatewayKey[]>(
-			"/api/v2/aibridge/keys",
+			`${aiGatewayPath}/keys`,
 		);
 		return response.data;
 	};
@@ -3179,14 +3256,14 @@ class ApiMethods {
 		req: TypesGen.CreateAIGatewayKeyRequest,
 	): Promise<TypesGen.CreateAIGatewayKeyResponse> => {
 		const response = await this.axios.post<TypesGen.CreateAIGatewayKeyResponse>(
-			"/api/v2/aibridge/keys",
+			`${aiGatewayPath}/keys`,
 			req,
 		);
 		return response.data;
 	};
 
 	deleteAIGatewayKey = async (id: string): Promise<void> => {
-		await this.axios.delete(`/api/v2/aibridge/keys/${encodeURIComponent(id)}`);
+		await this.axios.delete(`${aiGatewayPath}/keys/${encodeURIComponent(id)}`);
 	};
 }
 
@@ -3383,6 +3460,17 @@ class ExperimentalApiMethods {
 	interruptChat = async (chatId: string): Promise<TypesGen.Chat> => {
 		const response = await this.axios.post<TypesGen.Chat>(
 			`/api/experimental/chats/${chatId}/interrupt`,
+		);
+		return response.data;
+	};
+
+	/**
+	 * Re-pins the chat to its agent's latest context snapshot and clears
+	 * the dirty marker. Returns the updated chat.
+	 */
+	refreshChatContext = async (chatId: string): Promise<TypesGen.Chat> => {
+		const response = await this.axios.put<TypesGen.Chat>(
+			`/api/experimental/chats/${chatId}/context`,
 		);
 		return response.data;
 	};

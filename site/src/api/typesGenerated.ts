@@ -146,7 +146,7 @@ export interface AIBridgeSession {
 // From codersdk/aibridge.go
 /**
  * AIBridgeSessionThreadsResponse is the response for GET
- * /api/v2/aibridge/sessions/{session_id} which returns a single
+ * /api/v2/ai-gateway/sessions/{session_id} which returns a single
  * session with fully expanded threads.
  */
 export interface AIBridgeSessionThreadsResponse {
@@ -203,6 +203,19 @@ export interface AIBridgeThread {
 	readonly ended_at?: string;
 	readonly token_usage: AIBridgeSessionThreadsTokenUsage;
 	readonly agentic_actions: readonly AIBridgeAgenticAction[];
+	/**
+	 * AgentFirewallSessionID links this thread to an agent firewall
+	 * confinement session. Nil when the request did not pass through
+	 * the agent firewall.
+	 */
+	readonly agent_firewall_session_id?: string;
+	/**
+	 * AgentFirewallSequenceNumber is the firewall sequence number from
+	 * the root interception. Used to determine the position of this
+	 * LLM request in the firewall event stream. Nil when the request
+	 * did not pass through the agent firewall.
+	 */
+	readonly agent_firewall_sequence_number?: number;
 }
 
 // From codersdk/aibridge.go
@@ -250,8 +263,14 @@ export interface AIGatewayKey {
 	readonly name: string;
 	readonly key_prefix: string;
 	readonly created_at: string;
-	readonly last_used_at?: string;
+	readonly last_heartbeat_at?: string;
 }
+
+// From codersdk/client.go
+/**
+ * AIGatewayKeyHeader contains the authentication key for a standalone AI Gateway replica.
+ */
+export const AIGatewayKeyHeader = "X-Coder-AI-Governance-Gateway-Key";
 
 // From codersdk/aiproviders.go
 /**
@@ -309,6 +328,13 @@ export interface AIProviderBedrockSettings {
 	 * AccessKey. Write-only.
 	 */
 	readonly access_key_secret?: string;
+	/**
+	 * RoleARN, when set, is the IAM role assumed via STS before calling
+	 * Bedrock. The base identity (static keys or the AWS environment, e.g.
+	 * IRSA / EKS Pod Identity / EC2 Instance Profile) signs the AssumeRole
+	 * call, and the resulting temporary credentials sign Bedrock requests.
+	 */
+	readonly role_arn?: string;
 }
 
 // From codersdk/aiproviders_bedrock.go
@@ -471,6 +497,7 @@ export type APIKeyScope =
 	| "ai_gateway_key:create"
 	| "ai_gateway_key:delete"
 	| "ai_gateway_key:read"
+	| "ai_gateway_key:update"
 	| "ai_model_price:*"
 	| "ai_model_price:read"
 	| "ai_model_price:update"
@@ -705,6 +732,7 @@ export const APIKeyScopes: APIKeyScope[] = [
 	"ai_gateway_key:create",
 	"ai_gateway_key:delete",
 	"ai_gateway_key:read",
+	"ai_gateway_key:update",
 	"ai_model_price:*",
 	"ai_model_price:read",
 	"ai_model_price:update",
@@ -1026,6 +1054,23 @@ export const AgentDisplayModes: AgentDisplayMode[] = [
 
 // From codersdk/agentfirewall.go
 /**
+ * AgentFirewallLog represents a single audit event from an agent firewall proxy.
+ */
+export interface AgentFirewallLog {
+	readonly id: string;
+	readonly session_id: string;
+	readonly sequence_number: number;
+	readonly allowed: boolean;
+	readonly created_at: string;
+	readonly proto: string;
+	readonly method: string;
+	readonly detail: string;
+	readonly matched_rule: string | null;
+	readonly captured_at?: string;
+}
+
+// From codersdk/agentfirewall.go
+/**
  * AgentFirewallSession represents a firewall session for a workspace agent.
  */
 export interface AgentFirewallSession {
@@ -1034,6 +1079,37 @@ export interface AgentFirewallSession {
 	readonly owner_id: string;
 	readonly confined_process: string;
 	readonly started_at: string;
+}
+
+// From codersdk/agentfirewall.go
+/**
+ * AgentFirewallSessionLogsParams are query parameters for listing
+ * agent firewall session logs.
+ */
+export interface AgentFirewallSessionLogsParams {
+	/**
+	 * SeqAfter is an inclusive lower bound on sequence_number.
+	 * Only logs with sequence_number >= SeqAfter are returned.
+	 */
+	readonly seq_after?: number;
+	/**
+	 * SeqBefore is an exclusive upper bound on sequence_number.
+	 * Only logs with sequence_number < SeqBefore are returned.
+	 */
+	readonly seq_before?: number;
+	/**
+	 * Limit caps the number of returned rows. Defaults to 100.
+	 */
+	readonly limit?: number;
+}
+
+// From codersdk/agentfirewall.go
+/**
+ * AgentFirewallSessionLogsResponse is the response for
+ * GET /api/v2/agent-firewall/sessions/{id}/logs.
+ */
+export interface AgentFirewallSessionLogsResponse {
+	readonly results: readonly AgentFirewallLog[];
 }
 
 // From codersdk/workspacebuilds.go
@@ -1509,13 +1585,6 @@ export interface Chat {
 	 */
 	readonly has_unread: boolean;
 	/**
-	 * LastInjectedContext holds the most recently persisted
-	 * injected context parts (AGENTS.md files and skills). It
-	 * is updated only when context changes, on first workspace
-	 * attach or agent change.
-	 */
-	readonly last_injected_context?: readonly ChatMessagePart[];
-	/**
 	 * Context reports the chat's pinned workspace-context state and
 	 * whether it has drifted from the agent's latest pushed snapshot.
 	 * Nil when the chat has no pinned context yet.
@@ -1626,6 +1695,13 @@ export interface ChatContext {
 	 * (empty when healthy).
 	 */
 	readonly error?: string;
+	/**
+	 * Resources is the chat's pinned context (instruction files and
+	 * skills) the prompt is built from, metadata only (no bodies). It is
+	 * populated only on the single-chat GET response; list and watch
+	 * payloads leave it nil to stay lightweight.
+	 */
+	readonly resources?: readonly ChatContextResource[];
 }
 
 // From codersdk/chats.go
@@ -1648,6 +1724,95 @@ export interface ChatContextFilePart {
 	 * re-persisted with fresh content.
 	 */
 	readonly context_file_agent_id?: string;
+}
+
+// From codersdk/chats.go
+/**
+ * ChatContextResource is one pinned workspace-context resource the chat's
+ * prompt is built from. It is metadata only; bodies are omitted. Reported
+ * only on the single-chat GET response.
+ */
+export interface ChatContextResource {
+	/**
+	 * Source is the resource locator: the canonical file path for an
+	 * instruction file, the skill directory for a skill, the file path for
+	 * an MCP config, or the server name for an MCP server.
+	 */
+	readonly source: string;
+	readonly kind: ChatContextResourceKind;
+	/**
+	 * SizeBytes is the original payload size in bytes.
+	 */
+	readonly size_bytes: number;
+	/**
+	 * SkillName and SkillDescription are populated only for skill kinds.
+	 */
+	readonly skill_name?: string;
+	readonly skill_description?: string;
+	/**
+	 * Tools lists the tools exposed by an MCP server. Populated only for the
+	 * mcp_server kind; nil otherwise.
+	 */
+	readonly tools?: readonly ChatContextTool[];
+	/**
+	 * Status is the resource's health. Non-ok resources (invalid, unreadable,
+	 * oversize, excluded) are still reported so the UI can surface why a
+	 * resource was dropped from the prompt instead of silently omitting it;
+	 * their body-specific fields (skill name, tools) are empty.
+	 */
+	readonly status: ChatContextResourceStatus;
+	/**
+	 * Error explains a non-ok Status; empty when healthy. May also carry a
+	 * non-fatal warning when Status is ok.
+	 */
+	readonly error?: string;
+}
+
+// From codersdk/chats.go
+export type ChatContextResourceKind =
+	| "instruction_file"
+	| "mcp_config"
+	| "mcp_server"
+	| "skill";
+
+export const ChatContextResourceKinds: ChatContextResourceKind[] = [
+	"instruction_file",
+	"mcp_config",
+	"mcp_server",
+	"skill",
+];
+
+// From codersdk/chats.go
+export type ChatContextResourceStatus =
+	| "excluded"
+	| "invalid"
+	| "ok"
+	| "oversize"
+	| "unreadable";
+
+export const ChatContextResourceStatuses: ChatContextResourceStatus[] = [
+	"excluded",
+	"invalid",
+	"ok",
+	"oversize",
+	"unreadable",
+];
+
+// From codersdk/chats.go
+/**
+ * ChatContextTool is one tool exposed by a pinned MCP server, reported on the
+ * single-chat GET response. Metadata only; the input schema is omitted.
+ */
+export interface ChatContextTool {
+	/**
+	 * Name is the tool name with the "<server>__" prefix the agent adds
+	 * stripped, so it reads as the server exposes it.
+	 */
+	readonly name: string;
+	/**
+	 * Description is the tool's human-readable summary; may be empty.
+	 */
+	readonly description?: string;
 }
 
 // From codersdk/chats.go
@@ -3110,6 +3275,11 @@ export interface ChatWorkspaceTTLResponse {
 	readonly workspace_ttl_ms: number;
 }
 
+// From codersdk/deployment.go
+export interface ClusterConfig {
+	readonly host: string;
+}
+
 // From codersdk/client.go
 /**
  * CoderDesktopTelemetryHeader contains a JSON-encoded representation of Desktop telemetry
@@ -3536,6 +3706,12 @@ export interface CreateTemplateRequest {
 	 * but can be set to 0 to disable activity bumping.
 	 */
 	readonly activity_bump_ms?: number;
+	/**
+	 * TimeTilAutostopNotifyMillis allows optionally specifying the duration
+	 * before the autostop deadline at which a reminder notification is sent for
+	 * workspaces created from this template. Defaults to 0 (disabled).
+	 */
+	readonly time_til_autostop_notify_ms?: number;
 	/**
 	 * AutostopRequirement allows optionally specifying the autostop requirement
 	 * for workspaces created from this template. This is an enterprise feature.
@@ -4119,6 +4295,7 @@ export interface DeploymentValues {
 	readonly http_address?: string;
 	readonly autobuild_poll_interval?: number;
 	readonly job_hang_detector_interval?: number;
+	readonly cluster?: ClusterConfig;
 	readonly derp?: DERP;
 	readonly prometheus?: PrometheusConfig;
 	readonly pprof?: PprofConfig;
@@ -6093,6 +6270,14 @@ export interface OIDCConfig {
 	 */
 	readonly redirect_url: string;
 	readonly auto_repair_links: boolean;
+	/**
+	 * EmailFallback allows OIDC logins to fall back to email-based matching
+	 * when the `linked_id` (issuer+subject) does not match an existing user
+	 * link. INSECURE: weakens the linked_id check. It exists for IdP
+	 * brokers that do not issue a stable `sub` for the same user across
+	 * connections.
+	 */
+	readonly email_fallback: boolean;
 }
 
 // From codersdk/parameters.go
@@ -8019,6 +8204,12 @@ export interface Template {
 	readonly default_ttl_ms: number;
 	readonly activity_bump_ms: number;
 	/**
+	 * TimeTilAutostopNotifyMillis is the duration before the workspace's
+	 * autostop deadline at which a reminder notification is sent. 0 disables
+	 * the notification.
+	 */
+	readonly time_til_autostop_notify_ms: number;
+	/**
 	 * AutostopRequirement and AutostartRequirement are enterprise features. Its
 	 * value is only used if your license is entitled to use the advanced template
 	 * scheduling feature.
@@ -8132,6 +8323,7 @@ export interface TemplateBuilderBase {
 	readonly icon: string;
 	readonly os: string;
 	readonly variables: readonly TemplateBuilderModuleVariable[];
+	readonly prerequisites: string;
 }
 
 // From codersdk/templatebuilder.go
@@ -8956,6 +9148,13 @@ export interface UpdateTemplateMeta {
 	 */
 	readonly activity_bump_ms?: number;
 	/**
+	 * TimeTilAutostopNotifyMillis allows optionally specifying the duration
+	 * before the autostop deadline at which a reminder notification is sent for
+	 * workspaces created from this template. Defaults to 0 (disabled). Omitting
+	 * the field keeps the existing value.
+	 */
+	readonly time_til_autostop_notify_ms?: number;
+	/**
 	 * AutostopRequirement and AutostartRequirement can only be set if your license
 	 * includes the advanced template scheduling feature. If you attempt to set this
 	 * value while unlicensed, it will be ignored.
@@ -9100,6 +9299,12 @@ export interface UpdateUserPreferenceSettingsRequest {
 export interface UpdateUserProfileRequest {
 	readonly username: string;
 	readonly name: string;
+	/**
+	 * AvatarURL is only applied for users whose login type is password or
+	 * none. For other login types the avatar is synced from the identity
+	 * provider on login, so a submitted value is ignored.
+	 */
+	readonly avatar_url: string;
 }
 
 // From codersdk/users.go

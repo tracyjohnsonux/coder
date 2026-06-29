@@ -257,7 +257,8 @@ CREATE TYPE api_key_scope AS ENUM (
     'ai_gateway_key:*',
     'ai_gateway_key:create',
     'ai_gateway_key:delete',
-    'ai_gateway_key:read'
+    'ai_gateway_key:read',
+    'ai_gateway_key:update'
 );
 
 CREATE TYPE app_sharing_level AS ENUM (
@@ -373,7 +374,8 @@ CREATE TYPE crypto_key_feature AS ENUM (
     'workspace_apps_token',
     'workspace_apps_api_key',
     'oidc_convert',
-    'tailnet_resume'
+    'tailnet_resume',
+    'nats_ca'
 );
 
 CREATE TYPE display_app AS ENUM (
@@ -1439,7 +1441,7 @@ CREATE TABLE ai_gateway_keys (
     name text NOT NULL,
     secret_prefix character varying(11) NOT NULL,
     hashed_secret bytea NOT NULL,
-    last_used_at timestamp with time zone,
+    last_heartbeat_at timestamp with time zone,
     CONSTRAINT ai_gateway_keys_hashed_secret_check CHECK ((length(hashed_secret) > 0)),
     CONSTRAINT ai_gateway_keys_name_check CHECK (((length(name) <= 64) AND (name ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text))),
     CONSTRAINT ai_gateway_keys_secret_prefix_check CHECK ((length((secret_prefix)::text) = 11))
@@ -1999,7 +2001,6 @@ CREATE TABLE chats (
     agent_id uuid,
     pin_order integer DEFAULT 0 NOT NULL,
     last_read_message_id bigint,
-    last_injected_context jsonb,
     dynamic_tools jsonb,
     organization_id uuid NOT NULL,
     plan_mode chat_plan_mode,
@@ -2114,7 +2115,6 @@ CREATE VIEW chats_expanded AS
     c.agent_id,
     c.pin_order,
     c.last_read_message_id,
-    c.last_injected_context,
     c.dynamic_tools,
     c.organization_id,
     c.plan_mode,
@@ -2793,8 +2793,17 @@ CREATE TABLE replicas (
     database_latency integer NOT NULL,
     version text NOT NULL,
     error text DEFAULT ''::text NOT NULL,
-    "primary" boolean DEFAULT true NOT NULL
+    "primary" boolean DEFAULT true NOT NULL,
+    cluster_host text DEFAULT ''::text NOT NULL,
+    nats_port integer DEFAULT 0 NOT NULL,
+    CONSTRAINT nats_port_valid_tcp CHECK (((nats_port >= 0) AND (nats_port <= 65535)))
 );
+
+COMMENT ON COLUMN replicas.relay_address IS 'URL for DERP relays.';
+
+COMMENT ON COLUMN replicas.cluster_host IS 'Hostname or IP address the replica is reachable at for clustering purposes.';
+
+COMMENT ON COLUMN replicas.nats_port IS 'Port number for NATS clustering. 0 means NATS is disabled.';
 
 CREATE TABLE site_configs (
     key character varying(256) NOT NULL,
@@ -2972,8 +2981,11 @@ CREATE TABLE workspace_builds (
     template_version_preset_id uuid,
     has_ai_task boolean,
     has_external_agent boolean,
+    notified_autostop_deadline timestamp with time zone DEFAULT '0001-01-01 00:00:00+00'::timestamp with time zone NOT NULL,
     CONSTRAINT workspace_builds_deadline_below_max_deadline CHECK ((((deadline <> '0001-01-01 00:00:00+00'::timestamp with time zone) AND (deadline <= max_deadline)) OR (max_deadline = '0001-01-01 00:00:00+00'::timestamp with time zone)))
 );
+
+COMMENT ON COLUMN workspace_builds.notified_autostop_deadline IS 'The autostop deadline value that an autostop reminder notification was last sent for. Used for idempotence: when it equals the build deadline the reminder has already been sent, and it re-arms automatically when the deadline changes.';
 
 CREATE TABLE workspaces (
     id uuid NOT NULL,
@@ -3347,7 +3359,8 @@ CREATE TABLE templates (
     max_port_sharing_level app_sharing_level DEFAULT 'owner'::app_sharing_level NOT NULL,
     use_classic_parameter_flow boolean DEFAULT false NOT NULL,
     cors_behavior cors_behavior DEFAULT 'simple'::cors_behavior NOT NULL,
-    disable_module_cache boolean DEFAULT false NOT NULL
+    disable_module_cache boolean DEFAULT false NOT NULL,
+    time_til_autostop_notify bigint DEFAULT 0 NOT NULL
 );
 
 COMMENT ON COLUMN templates.default_ttl IS 'The default duration for autostop for workspaces created from this template.';
@@ -3369,6 +3382,8 @@ COMMENT ON COLUMN templates.autostart_block_days_of_week IS 'A bitmap of days of
 COMMENT ON COLUMN templates.deprecated IS 'If set to a non empty string, the template will no longer be able to be used. The message will be displayed to the user.';
 
 COMMENT ON COLUMN templates.use_classic_parameter_flow IS 'Determines whether to default to the dynamic parameter creation flow for this template or continue using the legacy classic parameter creation flow.This is a template wide setting, the template admin can revert to the classic flow if there are any issues. An escape hatch is required, as workspace creation is a core workflow and cannot break. This column will be removed when the dynamic parameter creation flow is stable.';
+
+COMMENT ON COLUMN templates.time_til_autostop_notify IS 'How long before the workspace autostop deadline to send a reminder notification, in nanoseconds. 0 disables the notification.';
 
 CREATE VIEW template_with_names AS
  SELECT templates.id,
@@ -3402,6 +3417,7 @@ CREATE VIEW template_with_names AS
     templates.use_classic_parameter_flow,
     templates.cors_behavior,
     templates.disable_module_cache,
+    templates.time_til_autostop_notify,
     COALESCE(visible_users.avatar_url, ''::text) AS created_by_avatar_url,
     COALESCE(visible_users.username, ''::text) AS created_by_username,
     COALESCE(visible_users.name, ''::text) AS created_by_name,
@@ -3858,6 +3874,7 @@ CREATE VIEW workspace_build_with_user AS
     workspace_builds.template_version_preset_id,
     workspace_builds.has_ai_task,
     workspace_builds.has_external_agent,
+    workspace_builds.notified_autostop_deadline,
     COALESCE(visible_users.avatar_url, ''::text) AS initiator_by_avatar_url,
     COALESCE(visible_users.username, ''::text) AS initiator_by_username,
     COALESCE(visible_users.name, ''::text) AS initiator_by_name
